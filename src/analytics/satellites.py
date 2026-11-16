@@ -22,7 +22,8 @@ import numpy as np
 from src.analytics.adsb import _ecef, frame_xy_from_enu
 
 GROUPS = ("stations", "visual")  # default groups
-GROUP_CHOICES = ("stations", "visual", "weather", "noaa", "gps-ops", "galileo", "science")  # CelesTrak groups offered in Settings
+GROUP_CHOICES = ("stations", "visual", "weather", "noaa", "gps-ops", "galileo", "science", "starlink-dtc")  # groups offered in Settings
+CELESTRAK_GROUP = {"starlink-dtc": "starlink"}  # virtual groups filtered from a larger CelesTrak feed
 TLE_URL = "https://celestrak.org/NORAD/elements/gp.php?GROUP={group}&FORMAT=tle"
 SATNOGS_URL = "https://db.satnogs.org/api/tle/?format=3le"  # one file for every satellite in SatNOGS DB (no groups)
 SATNOGS_GROUP = "satnogs"
@@ -128,10 +129,16 @@ class SatelliteTracker:
         try:
             tles: List[Dict[str, str]] = []
             sources = [(self.url_template, SATNOGS_GROUP)] if self._single else [
-                (self.url_template.format(group=g), g) for g in list(self.groups)]
+                (self.url_template.format(group=CELESTRAK_GROUP.get(g, g)), g) for g in list(self.groups)]
             for url, g in sources:
                 with net_urlopen(url, timeout=30) as r:
-                    tles += _parse_tle(r.read().decode("ascii", "replace"), g)
+                    parsed = _parse_tle(r.read().decode("ascii", "replace"), g)
+                    if g == "starlink-dtc":
+                        # CelesTrak marks the cellular spacecraft in the Starlink feed explicitly,
+                        # e.g. "STARLINK-11740 [DTC]".  Keep that exact subset rather than loading
+                        # the full (10,000+) constellation onto a small station host.
+                        parsed = [t for t in parsed if "[DTC]" in t["name"].upper()]
+                    tles += parsed
             if not tles:
                 raise ValueError("the source returned no TLE records")
             now = time.time()

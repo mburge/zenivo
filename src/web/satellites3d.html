@@ -97,6 +97,7 @@
         .grp { font: 600 10px var(--font-sans); text-transform: uppercase; letter-spacing: 0.04em; padding: 1px 5px; border-radius: 3px;
             margin-left: 6px; background: var(--bg-card-sub); color: var(--text-secondary); vertical-align: 1px; }
         .grp.stations { color: #c4b5fd; }
+        .grp.starlink-dtc { color: #60a5fa; }
         .tags { display: flex; gap: 4px; }
         .tag { font: 600 10px var(--font-sans); padding: 1px 5px; border-radius: 3px; background: var(--bg-card-sub); color: var(--text-secondary); }
         .tag.vis { color: #22d3ee; } .tag.sun { color: #f59e0b; } .tag.cam { color: var(--warning); }
@@ -1429,7 +1430,7 @@
                     a.sunlit ? `<span class="tag sun">Sunlit</span>` : `<span class="tag">Shadow</span>`,
                     a.in_view ? `<span class="tag cam">In camera</span>` : ""].join("");
                 return `<li data-id="${a.norad}" class="${a.visible ? "visible" : ""}${a.norad === selected ? " selected" : ""}">
-                    <div class="r1"><span><span class="cs">${esc(a.name)}</span><span class="grp ${esc(a.group)}">${a.group === "stations" ? "Station" : "Bright"}</span></span>
+                    <div class="r1"><span><span class="cs">${esc(a.name)}</span><span class="grp ${esc(a.group)}">${a.group === "stations" ? "Station" : a.group === "starlink-dtc" ? "Starlink DTC" : "Bright"}</span></span>
                         <span class="meta">${Math.round(a.alt_deg)}° · ${Math.round(a.az_deg)}° ${compass(a.az_deg)}</span></div>
                     <div class="r2"><span class="meta">${km(a.range_km)} · h ${km(a.height_km)}</span><span class="tags">${tags}</span></div></li>`;
             }).join("") : `<li><span class="meta">${filter === "visible" ? "No satellite is naked-eye visible right now (above the horizon, sunlit, dark sky). Choose “Above horizon” to see those that are up but unlit." : "No satellites match."}</span></li>`;
@@ -1477,7 +1478,7 @@
             const a = s.a;
             $("info-mini").textContent = `${a.alt_deg.toFixed(0)}° · ${km(a.range_km)}`;
             $("info-name").textContent = a.name;
-            $("info-sub").textContent = `NORAD ${a.norad} · ${a.group === "stations" ? "Space station" : "Bright satellite"}`;
+            $("info-sub").textContent = `NORAD ${a.norad} · ${a.group === "stations" ? "Space station" : a.group === "starlink-dtc" ? "Starlink Direct-to-Cell" : "Bright satellite"}`;
             const why = a.visible ? "Visible to the naked eye"
                 : !a.above_horizon ? "Below the horizon"
                 : !a.sunlit ? "In Earth's shadow"
@@ -1487,7 +1488,7 @@
                 .map(([k, v]) => `<div><small>${k}</small><b>${esc(v)}</b></div>`).join("");
             const rows = [
                 ["NORAD", a.norad],
-                ["Group", a.group === "stations" ? "Station" : "Bright"],
+                ["Group", a.group === "stations" ? "Station" : a.group === "starlink-dtc" ? "Starlink Direct-to-Cell" : "Bright"],
                 ["Lighting", a.sunlit ? "Sunlit" : "In Earth's shadow"],
                 ["Visibility", why],
                 ["In camera view", a.in_view ? "yes" : "no"],

@@ -31,7 +31,8 @@ def test_defaults_and_choices(client_service):
     client, _ = client_service
     d = client.get("/api/satellites/config").json()
     assert d["enabled"] == 1 and d["groups"] == ["stations", "visual"] and d["refresh_h"] == 24
-    assert d["tle_url"] == "" and "weather" in d["group_choices"] and "{group}" in d["default_url"]
+    assert d["tle_url"] == "" and {"weather", "starlink-dtc"}.issubset(d["group_choices"])
+    assert "{group}" in d["default_url"]
     assert d["status"]["groups"] == ["stations", "visual"]
 
 
@@ -121,6 +122,41 @@ def test_satnogs_source_is_one_file_and_strips_3le_names(tmp_path, monkeypatch):
     t._fetch()
     assert asked == [sats.SATNOGS_URL] and t.status()["count"] == 1 and t._sats[0][0] == "ISS (ZARYA)"
     assert t._sats[0][1] == sats.SATNOGS_GROUP and t.status()["source"] == "db.satnogs.org"
+
+
+def test_starlink_dtc_virtual_group_downloads_starlink_and_keeps_only_dtc(tmp_path, monkeypatch):
+    import io
+
+    lines = (
+        "STARLINK-11740 [DTC]\n"
+        "1 25544U 98067A   26318.94812295  .00009771  00000-0  18276-3 0  9991\n"
+        "2 25544  51.6323 274.0377 0007413  26.4902 333.6464 15.49382049595126\n"
+        "STARLINK-1000\n"
+        "1 25545U 98067A   26318.94812295  .00009771  00000-0  18276-3 0  9991\n"
+        "2 25545  51.6323 274.0377 0007413  26.4902 333.6464 15.49382049595126\n"
+    )
+    asked, captured = [], []
+
+    class Resp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    def fake(url, timeout=0):
+        asked.append(url)
+        return Resp(lines.encode())
+
+    monkeypatch.setattr(sats, "net_urlopen", fake)
+    t = sats.SatelliteTracker(str(tmp_path / "tle.json"))
+    t.configure(groups=["starlink-dtc"])
+    monkeypatch.setattr(t, "_set_tles", lambda rows, fetched_at: captured.extend(rows))
+    t._fetching = True
+    t._fetch()
+
+    assert asked == [sats.TLE_URL.format(group="starlink")]
+    assert [(row["name"], row["group"]) for row in captured] == [("STARLINK-11740 [DTC]", "starlink-dtc")]
 
 
 def test_source_setting_is_saved_and_validated(client_service):
