@@ -66,6 +66,16 @@ def test_unlocked_auto_also_runs_to_60s():
     assert exp == 60.0
 
 
+def test_unlocked_auto_respects_hardware_gain_ceiling_and_keeps_lengthening_exposure():
+    ae = DayNightAutoExposure(latitude_deg=21.0285, longitude_deg=105.8542,
+                              initial_exposure_s=4.0, initial_gain_db=43.5)
+    ae.hw_max_exposure_s = 90.0
+    ae.hw_max_gain_db = 43.5
+    exp, gain, _ = ae.process_frame_feedback(_frame(5), NIGHT, live_camera=True)
+    assert gain == 43.5
+    assert exp > 4.0
+
+
 def test_stamp_writes_corner_and_keeps_input():
     from src.pipeline.overlay import stamp_frame_info, frame_brightness
     frame = np.zeros((972, 1296, 3), dtype=np.uint8)

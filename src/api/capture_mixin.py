@@ -198,7 +198,10 @@ class CaptureMixin:
                     self.auto_exposure.exposure_s = float(getattr(self.camera, "current_exposure_s", self.auto_exposure.exposure_s))
                     self.auto_exposure.gain_db = float(getattr(self.camera, "current_gain_db", self.auto_exposure.gain_db))
                     self.auto_exposure.hw_min_exposure_s = getattr(self.camera, "min_exposure_s", None)
-                    self.auto_exposure.hw_max_exposure_s = camera_limits(self.camera).get("max_exposure_s")
+                    limits = camera_limits(self.camera)
+                    self.auto_exposure.hw_max_exposure_s = limits.get("max_exposure_s")
+                    self.auto_exposure.hw_min_gain_db = limits.get("min_gain_db")
+                    self.auto_exposure.hw_max_gain_db = limits.get("max_gain_db")
                     new_exp, new_gain, ae_telem = self.auto_exposure.process_frame_feedback(
                         frame, live_camera=not is_pytest
                     )

@@ -132,6 +132,9 @@ class DayNightAutoExposure:
         self.target_brightness: Optional[float] = None
         # Longest exposure the live camera accepts; auto exposure runs up to 60 s within it
         self.hw_max_exposure_s: Optional[float] = None
+        # Actual gain range exposed by the camera backend (some cameras stop below the generic 48 dB ceiling)
+        self.hw_min_gain_db: Optional[float] = None
+        self.hw_max_gain_db: Optional[float] = None
 
     def update_profile(self, solar_elevation_deg: float) -> str:
         """
@@ -271,6 +274,11 @@ class DayNightAutoExposure:
                 max_exp = min(max_exp, float(self.hw_max_exposure_s))
             min_gain = 0.0
             max_gain = 48.0
+            if isinstance(self.hw_min_gain_db, (int, float)):
+                min_gain = max(min_gain, float(self.hw_min_gain_db))
+            if isinstance(self.hw_max_gain_db, (int, float)):
+                max_gain = min(max_gain, float(self.hw_max_gain_db))
+            max_gain = max(min_gain, max_gain)
             target_y = 142.0 if solar_elev >= -2.0 else 85.0
             base_luma = 0.5 * p50 + 0.5 * mean_luma
             sky_luma = 0.50 * sky_p50 + 0.50 * sky_mean
