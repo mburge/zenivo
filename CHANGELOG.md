@@ -10,6 +10,8 @@ All notable changes to Zenivo are recorded here. The format follows
 
 ### Fixed
 
+- Auto exposure now honors camera backend minimum and maximum gain limits; cameras below the generic 48 dB ceiling continue lengthening exposure instead of repeatedly requesting an unreachable gain.
+
 - Events: on clear, crowded skies twinkling stars lined up by chance into faint "aircraft" and "satellite" dot tracks (most events in a three-day sample, none matching a flight). A weak dot track (under 60 DN) now needs six positions and must not sit on stars that are also bright in the other recent frames; strong strobes and flight-matched events are unchanged.
 - RTS5869: the bridge's ISP gain default is restored at stream start (gain 0 halved MJPG frames and froze the daytime auto exposure on a white picture).
 

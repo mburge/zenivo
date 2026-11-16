@@ -53,7 +53,10 @@ class ExposureMixin:
                     self.auto_exposure.exposure_s = float(getattr(self.camera, "current_exposure_s", self.auto_exposure.exposure_s))
                     self.auto_exposure.gain_db = float(getattr(self.camera, "current_gain_db", self.auto_exposure.gain_db))
                     self.auto_exposure.hw_min_exposure_s = getattr(self.camera, "min_exposure_s", None)
-                    self.auto_exposure.hw_max_exposure_s = camera_limits(self.camera).get("max_exposure_s")
+                    limits = camera_limits(self.camera)
+                    self.auto_exposure.hw_max_exposure_s = limits.get("max_exposure_s")
+                    self.auto_exposure.hw_min_gain_db = limits.get("min_gain_db")
+                    self.auto_exposure.hw_max_gain_db = limits.get("max_gain_db")
                     new_exp, new_gain, _ = self.auto_exposure.process_frame_feedback(self.last_frame, live_camera=True)
                     self.camera.set_hardware_exposure(new_exp, new_gain)
                     self.last_capture_time = 0.0
@@ -128,9 +131,13 @@ class ExposureMixin:
             lim = camera_limits(self.camera)
             min_exp = float(lim.get("min_exposure_s") or 1e-6)
             max_exp = float(lim.get("max_exposure_s") or 15.0)
-            max_gain = float(lim.get("max_gain_db") or 48.0)
+            max_gain = 48.0 if lim.get("max_gain_db") is None else float(lim["max_gain_db"])
             old_exp = max(min_exp, float(getattr(self.camera, "current_exposure_s", ae.exposure_s) or ae.exposure_s))
-            old_gain = float(getattr(self.camera, "current_gain_db", ae.gain_db) or ae.gain_db)
+            old_gain = float(getattr(self.camera, "current_gain_db", ae.gain_db))
+            ae.hw_min_exposure_s = min_exp
+            ae.hw_max_exposure_s = max_exp
+            ae.hw_min_gain_db = lim.get("min_gain_db")
+            ae.hw_max_gain_db = lim.get("max_gain_db")
             ae.lock_exposure_s = ae.lock_gain_db = None
             if lock == "exposure":
                 v = float(value if value is not None else old_exp)
