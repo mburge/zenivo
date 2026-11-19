@@ -193,7 +193,23 @@ class TrafficMixin:
         return sol
 
     def _overlay_station(self) -> Dict[str, float]:
-        return {"latitude_deg": self.auto_exposure.lat, "longitude_deg": self.auto_exposure.lon,
+        """Precise station used only for geometric projection.
+
+        The public station settings may intentionally be rounded for privacy.  A service-only environment
+        override keeps the exact receiver position out of the interface while preserving nearby-aircraft
+        geometry.
+        """
+        lat = float(self.auto_exposure.lat)
+        lon = float(self.auto_exposure.lon)
+        try:
+            lat = float(os.environ.get("ZENIVO_TRAFFIC_LATITUDE", lat))
+            lon = float(os.environ.get("ZENIVO_TRAFFIC_LONGITUDE", lon))
+            if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+                raise ValueError("traffic station coordinates out of range")
+        except (TypeError, ValueError):
+            lat = float(self.auto_exposure.lat)
+            lon = float(self.auto_exposure.lon)
+        return {"latitude_deg": lat, "longitude_deg": lon,
                 "elevation_m": float(self.station_config.get("elevation_m") or 0.0)}
 
     def get_satellites_now(self, track_min: float = 0.0, below: bool = False, limit: int = 60,
@@ -698,8 +714,7 @@ class TrafficMixin:
             ev["sky_to"] = dict(zip(("az_deg", "alt_deg"), frame_to_azalt(ln[2], ln[3], sol)))
         t0 = float(ev.get("start_ts", ev["ts"]))
         t1 = float(ev.get("end_ts", t0))
-        station = {"latitude_deg": self.auto_exposure.lat, "longitude_deg": self.auto_exposure.lon,
-                   "elevation_m": float(self.station_config.get("elevation_m") or 0.0)}
+        station = self._overlay_station()
         tracks = feed.tracks(t0, t1)
         flight = match_flight(ev, tracks, station, sol, lag_s=self.ADSB_FRAME_LAG_S)
         if flight is None:
