@@ -400,7 +400,7 @@ class RTS5869CameraController(CameraDriverInterface):
             self._sync_capture_mode(self.current_exposure_s)
 
 
-CAMERA_TYPES = ("auto", "rts5869", "picamera", "zwo", "qhy", "v4l2", "simulator")
+CAMERA_TYPES = ("auto", "rts5869", "picamera", "zwo", "qhy", "v4l2", "indi", "simulator")
 
 
 def _simulator(width: int, height: int) -> CameraDriverInterface:
@@ -516,6 +516,13 @@ def get_camera_driver(
     if prefer_simulator or camera_type == "simulator":
         logger.info("Simulator explicitly requested; initializing SimulatedIMX335Controller.")
         return _simulator(width, height)
+
+    # Explicit prototype: never silently substitute simulated captures.
+    if camera_type == "indi":
+        from .indi import IndiController
+        controller = IndiController()
+        controller.open()
+        return controller
 
     candidates = []
     if camera_type in ("auto", "rts5869"):

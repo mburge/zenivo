@@ -69,7 +69,7 @@ class OutputResolutionRequest(BaseModel):
 
 class CameraSelectRequest(BaseModel):
     """Request payload for switching the active camera."""
-    type: str = Field(..., pattern="^(auto|rts5869|picamera|zwo|qhy|v4l2|simulator)$", description="Camera backend")
+    type: str = Field(..., pattern="^(auto|rts5869|picamera|zwo|qhy|v4l2|indi|simulator)$", description="Camera backend")
     index: int = Field(0, ge=0, le=15, description="Camera number within that backend")
 
 
