@@ -269,7 +269,7 @@ function drawAircraft() {
         });
     }
     if (showAircraft) aircraftList.forEach((a) => {
-        if (!a.frame_xy) return;
+        if (!a.frame_xy || !a.in_view) return;
         if (a.distance_km != null && a.distance_km > AIRCRAFT_MAX_KM) return;   // too far to be a visible light: skip
         let fx = a.frame_xy[0], fy = a.frame_xy[1];
         if (a.frame_v) { fx += a.frame_v[0] * lag; fy += a.frame_v[1] * lag; }

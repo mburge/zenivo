@@ -15,6 +15,18 @@ import logging
 logger = logging.getLogger("imx335.api")
 
 
+def _open_sky_contains(xy, sky_regions, obstructions) -> bool:
+    """Whether a displayed-frame point is inside the positive sky mask and outside exclusions."""
+    if not xy:
+        return False
+    point = (float(xy[0]), float(xy[1]))
+    if sky_regions and not any(
+        cv2.pointPolygonTest(p, point, False) >= 0 for p in sky_regions
+    ):
+        return False
+    return not any(cv2.pointPolygonTest(p, point, False) >= 0 for p in obstructions)
+
+
 class TrafficMixin:
 
     def _fr24(self):
@@ -212,26 +224,49 @@ class TrafficMixin:
         return {"latitude_deg": lat, "longitude_deg": lon,
                 "elevation_m": float(self.station_config.get("elevation_m") or 0.0)}
 
+    def _overlay_mask(self):
+        """Positive sky regions and exclusions in displayed, normalized frame coordinates."""
+        mask = self.station_config.get("sky_mask") or {}
+        sky = [np.array(p, np.float32) for p in (mask.get("sky") or []) if len(p) >= 3]
+        obstruction = [np.array(p, np.float32) for p in (mask.get("obstruction") or []) if len(p) >= 3]
+        return sky, obstruction
+
+    def _mask_space_xy(self, xy, solution):
+        """Map a solver-space point into the displayed coordinate space used by the sky mask."""
+        if not xy:
+            return None
+        x, y = float(xy[0]), float(xy[1])
+        if solution and solution.get("coordinate_space") != "display":
+            transform = self.station_config.get("image_transform") or {}
+            rotate_180 = int(transform.get("rotate_deg", 0)) % 360 == 180
+            if bool(transform.get("flip_horizontal")) != rotate_180:
+                x = 1.0 - x
+            if bool(transform.get("flip_vertical")) != rotate_180:
+                y = 1.0 - y
+        return x, y
+
+    def _in_open_sky(self, xy, solution, sky_regions, obstructions) -> bool:
+        return _open_sky_contains(self._mask_space_xy(xy, solution), sky_regions, obstructions)
+
     def get_satellites_now(self, track_min: float = 0.0, below: bool = False, limit: int = 60,
                           track_ids: Optional[set] = None, trail_s: float = 0.0) -> Dict[str, Any]:
         """Large satellites above the horizon (stations + CelesTrak visual list) with their camera position."""
         if not self._satellite_settings()["enabled"]:
             return {"satellites": [], "disabled": True, "station": {"lat": self.auto_exposure.lat, "lon": self.auto_exposure.lon}}
         self._sat_tracker_get()
+        sol = self._overlay_solution()
         try:
-            res = self._sat_tracker.current(self._overlay_station(), self._overlay_solution(), track_min=track_min,
+            res = self._sat_tracker.current(self._overlay_station(), sol, track_min=track_min,
                                             include_below=below, track_ids=track_ids, trail_s=trail_s)
         except Exception as exc:
             # A missing sgp4 or an unreachable TLE feed must not hide the camera pointing the /sky page needs
             res = {"satellites": [], "error": f"{type(exc).__name__}: {exc}"}
-        obstructions = [np.array(p, np.float32) for p in ((self.station_config.get("sky_mask") or {}).get("obstruction") or [])]
+        sky_regions, obstructions = self._overlay_mask()
         for r in res["satellites"]:
             xy = r.get("frame_xy")
-            r["in_view"] = bool(xy) and not any(
-                cv2.pointPolygonTest(p, (float(xy[0]), float(xy[1])), False) >= 0 for p in obstructions)
+            r["in_view"] = self._in_open_sky(xy, sol, sky_regions, obstructions)
         res["satellites"] = res["satellites"][:limit]
         res["station"] = {"lat": self.auto_exposure.lat, "lon": self.auto_exposure.lon}
-        sol = self._overlay_solution()
         if sol:
             res["camera"] = {k: sol.get(k) for k in ("pointing_az_deg", "pointing_alt_deg", "roll_deg", "fov_horizontal_deg", "fov_vertical_deg")}
             # /sky draws the picture as displayed (night orientation): turn the stored native-frame solution into
@@ -279,7 +314,7 @@ class TrafficMixin:
             return {"t": t_now, "enabled": False, "sondes": [], "total": 0, "in_view": 0, "error": ""}
         station = self._overlay_station()
         sol = self._overlay_solution()
-        obstructions = [np.array(p, np.float32) for p in ((self.station_config.get("sky_mask") or {}).get("obstruction") or [])]
+        sky_regions, obstructions = self._overlay_mask()
         # Only a 0.5-degree grid cell centre (about 55 km) is sent to SondeHub; the exact station stays local (sky_position below).
         q_lat = snap_half_degree(station["latitude_deg"])
         q_lon = snap_half_degree(station["longitude_deg"])
@@ -294,7 +329,7 @@ class TrafficMixin:
                 xy2 = sky_position(station, nxt["lat"], nxt["lon"], nxt["alt"], sol).get("frame_xy")
                 if xy2:
                     pos["frame_v"] = [round(xy2[0] - xy[0], 5), round(xy2[1] - xy[1], 5)]
-            in_view = bool(xy) and not any(cv2.pointPolygonTest(p, (float(xy[0]), float(xy[1])), False) >= 0 for p in obstructions)
+            in_view = self._in_open_sky(xy, sol, sky_regions, obstructions)
             out.append({
                 "serial": s["serial"], "type": s["type"], "altitude_m": round(s["alt"]),
                 "climb_m_s": round(s["vel_v"], 1), "speed_kmh": round(s["vel_h"] * 3.6),
@@ -328,7 +363,7 @@ class TrafficMixin:
         st_lat = float(station["latitude_deg"])
         st_lon = float(station["longitude_deg"])
         cos_st = math.cos(math.radians(st_lat))
-        obstructions = [np.array(p, np.float32) for p in ((self.station_config.get("sky_mask") or {}).get("obstruction") or [])]
+        sky_regions, obstructions = self._overlay_mask()
         out: List[Dict[str, Any]] = []
         by_icao: Dict[str, Dict[str, Any]] = {}
         t_now = wall_now if at is None else float(at)
@@ -344,7 +379,7 @@ class TrafficMixin:
                     xy2 = sky_position(station, nxt["lat"], nxt["lon"], nxt["altitude_m"], sol).get("frame_xy")
                     if xy2:
                         pos["frame_v"] = [round(xy2[0] - xy[0], 5), round(xy2[1] - xy[1], 5)]   # frame fractions per second
-                in_view = bool(xy) and not any(cv2.pointPolygonTest(p, (float(xy[0]), float(xy[1])), False) >= 0 for p in obstructions)
+                in_view = self._in_open_sky(xy, sol, sky_regions, obstructions)
                 rec: Dict[str, Any] = {
                     "icao": a["icao"], "callsign": a["callsign"] or None, "source": feed_source,
                     "altitude_m": round(a["altitude_m"]), **motion_fields(a), **pos,
