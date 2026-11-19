@@ -7,6 +7,7 @@ let aircraftList = [];
 let aircraftFetchedAt = 0;
 let aircraftT = 0;       // server time of the positions in aircraftList
 let liveFrameT = null;   // server time the displayed frame was taken (mid-exposure)
+let aircraftFrameT = null; // frame time already fetched; one historical request per displayed frame
 let aircraftDrawQueued = false;
 function scheduleAircraftDraw() {
     if (aircraftDrawQueued) return;
@@ -69,13 +70,24 @@ function applyOverlayPush(layer, d) {
     drawAircraft();
 }
 function refreshAircraft() {
-    if (!chkAircraft || !chkAircraft.checked || document.hidden || overlayPushLive("aircraft")) return;
-    fetch("/api/adsb/aircraft?limit=60")
+    if (!chkAircraft || !chkAircraft.checked || document.hidden) return;
+    const frameT = Number.isFinite(liveFrameT) ? liveFrameT : null;
+    if (frameT != null && aircraftFrameT != null && Math.abs(frameT - aircraftFrameT) < 0.05) {
+        drawAircraft();
+        return;
+    }
+    // Packed pushes serve the current live view.  A timestamped displayed frame still
+    // needs a historical query so aircraft positions align with its exposure midpoint.
+    if (frameT == null && overlayPushLive("aircraft")) return;
+    const at = frameT == null ? "" : `&at=${encodeURIComponent(frameT)}`;
+    fetch(`/api/adsb/aircraft?limit=60${at}`)
         .then((r) => r.json())
         .then((d) => {
+            if (frameT != null && liveFrameT != null && Math.abs(frameT - liveFrameT) >= 0.05) return;
             aircraftList = (d && d.aircraft) || [];
             aircraftFetchedAt = Date.now();
             aircraftT = (d && d.t) || 0;
+            aircraftFrameT = frameT;
             drawAircraft();
         })
         .catch(() => {});

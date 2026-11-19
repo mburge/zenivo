@@ -158,27 +158,47 @@ class AircraftStore:
     def current(self, max_age_s: float = 60.0, trail_s: float = 0.0, at: Optional[float] = None) -> List[Dict[str, Any]]:
         """Latest state of every aircraft with a position in the last max_age_s seconds; with trail_s, also
         its recent path as [[lat, lon, alt_m, age_s], ...] (oldest first, one point per TRAIL_STEP_S, ending
-        at the latest fix)."""
-        now = time.time() if at is None else at   # `at`: dead-reckon to another instant (the displayed frame's, or a second later for the velocity)
+        at the latest fix).  When `at` precedes the newest fix, interpolate the stored fixes instead of
+        accidentally returning that future fix."""
+        now = time.time() if at is None else at
         out = []
         with self._lock:
             for a in self._ac.values():
-                if a["pos"] and now - a["pos"][-1][0] <= max_age_s:
-                    t, lat, lon, alt = a["pos"][-1]
+                positions = list(a["pos"])
+                if not positions:
+                    continue
+                latest_t = positions[-1][0]
+                historical = at is not None and now < latest_t
+                if historical:
+                    fix = _interp(positions, now)
+                    if fix is None:
+                        continue
+                    lat, lon, alt = fix
+                    t = now
+                elif now - latest_t <= max_age_s:
+                    t, lat, lon, alt = positions[-1]
                     fix = (lat, lon, alt)
                     lat, lon, alt = _dead_reckon(a, lat, lon, alt, now - t)
-                    rec = {"icao": a["icao"], "callsign": a["callsign"], "lat": lat, "lon": lon,
-                           "altitude_m": alt, "age_s": now - t,
-                           **{k: a[k] for k in ("speed_kt", "track_deg", "vrate_fpm") if k in a}}
-                    if trail_s > 0:
+                else:
+                    continue
+                rec = {"icao": a["icao"], "callsign": a["callsign"], "lat": lat, "lon": lon,
+                       "altitude_m": alt, "age_s": max(0.0, now - t),
+                       **{k: a[k] for k in ("speed_kt", "track_deg", "vrate_fpm") if k in a}}
+                if trail_s > 0:
+                    if historical:
+                        trail = [[round(plat, 5), round(plon, 5), round(palt), round(now - pt, 1)]
+                                 for pt, plat, plon, palt in a["trail"]
+                                 if 0.0 <= now - pt <= trail_s]
+                        trail.append([round(lat, 5), round(lon, 5), round(alt), 0.0])
+                    else:
                         trail = [[round(plat, 5), round(plon, 5), round(palt), round(now - pt, 1)]
                                  for pt, plat, plon, palt in a["trail"]
                                  if now - pt <= trail_s and (pt < t or (pt - t <= 0.1 and (plat != lat or plon != lon)))]
                         trail.append([round(fix[0], 5), round(fix[1], 5), round(fix[2]), round(now - t, 1)])
                         if fix != (lat, lon, alt):
                             trail.append([round(lat, 5), round(lon, 5), round(alt), 0.0])
-                        rec["trail"] = trail
-                    out.append(rec)
+                    rec["trail"] = trail
+                out.append(rec)
         return out
 
 

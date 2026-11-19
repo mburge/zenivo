@@ -12,7 +12,7 @@ from src.api.schemas import (
     WeatherSettingsRequest,
 )
 from src.api.service import AllSkyService
-from src.api.routes.common import (router, get_service, public_view, _check_range, _sat_cache, _traffic_cache, _dayobj_cache, _acinfo_cache, GUEST_MAX_SAT_IDS, GUEST_MAX_TRAIL_S)
+from src.api.routes.common import (router, get_service, public_view, _check_range, _check_ts, _sat_cache, _traffic_cache, _dayobj_cache, _acinfo_cache, GUEST_MAX_SAT_IDS, GUEST_MAX_TRAIL_S)
 
 
 @router.get("/api/adsb")
@@ -31,6 +31,7 @@ def get_adsb_aircraft(limit: int = Query(default=30, ge=1, le=6000),
                       bounds: Optional[str] = Query(default=None, max_length=120),
                       fr24: Optional[bool] = Query(default=None),
                       compact: bool = Query(default=False),
+                      at: Optional[float] = Query(default=None, description="recent frame midpoint, epoch seconds"),
                       request: Request = None,
                       service: AllSkyService = Depends(get_service)):
     """Aircraft heard right now (local ADS-B + Flightradar24 global feed): flight, altitude, speed, heading,
@@ -38,6 +39,8 @@ def get_adsb_aircraft(limit: int = Query(default=30, ge=1, le=6000),
     bounds=north,south,west,east or 'global' queries Flightradar24 for that region or the whole globe.
     For guests a box is snapped to a 1-degree grid and must lie within 500 km of the station (else 400)."""
     from src.auth.middleware import is_admin
+    if at is not None:
+        _check_ts(at=at)
     if bounds and not is_admin(request):
         from src.analytics.fr24 import normalize_guest_bounds
         try:
@@ -46,7 +49,7 @@ def get_adsb_aircraft(limit: int = Query(default=30, ge=1, le=6000),
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
     return public_view(request, service, service.get_aircraft_now(
-        limit=limit, trail_s=trail, bounds=bounds, include_fr24=fr24, compact=compact))
+        limit=limit, trail_s=trail, bounds=bounds, include_fr24=fr24, compact=compact, at=at))
 
 
 @router.get("/api/traffic")

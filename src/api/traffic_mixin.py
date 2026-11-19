@@ -291,8 +291,9 @@ class TrafficMixin:
 
     def get_aircraft_now(self, limit: int = 30, trail_s: float = 0.0,
                          bounds: Optional[str] = None, include_fr24: Optional[bool] = None,
-                         compact: bool = False) -> Dict[str, Any]:
-        """Aircraft heard right now (local ADS-B receiver + Flightradar24 global feed when bounds is given):
+                         compact: bool = False, at: Optional[float] = None) -> Dict[str, Any]:
+        """Aircraft heard now, or at a recent frame time from the receiver's position buffer
+        (local ADS-B receiver + Flightradar24 global feed when bounds is given):
         flight, altitude, speed, distance, direction, and whether it is inside the camera's open sky."""
         from src.analytics.adsb import motion_fields, sky_position
 
@@ -303,7 +304,8 @@ class TrafficMixin:
             return {"enabled": False, "connected": False, "aircraft": []}
         feed_source = "public" if feed is not None and feed is self.adsb_public else "local"
 
-        self._adsb_view_ts = time.time()  # someone is looking: keep the feed on, day or night
+        wall_now = time.time()
+        self._adsb_view_ts = wall_now  # someone is looking: keep the feed on, day or night
         sol = self._overlay_solution()
         station = self._overlay_station()
         st_lat = float(station["latitude_deg"])
@@ -312,7 +314,7 @@ class TrafficMixin:
         obstructions = [np.array(p, np.float32) for p in ((self.station_config.get("sky_mask") or {}).get("obstruction") or [])]
         out: List[Dict[str, Any]] = []
         by_icao: Dict[str, Dict[str, Any]] = {}
-        t_now = time.time()
+        t_now = wall_now if at is None else float(at)
 
         if feed is not None:
             # Where each aircraft will be one second later: lets the page slide every mark to the instant of the frame it is shown on
