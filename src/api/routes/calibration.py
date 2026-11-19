@@ -33,7 +33,7 @@ def get_dark_preview(
     stats: bool = Query(False),
     service: AllSkyService = Depends(get_service),
 ):
-    """Contrast-stretched PNG preview (or stats JSON with stats=1) of a saved RAW10 master dark."""
+    """Contrast-stretched PNG preview (or stats JSON with stats=1) of a saved native-RAW master dark."""
     res = _dark_preview_cache.get_or_compute(file, lambda: service.get_dark_preview(file))
     if res is None:
         raise HTTPException(status_code=404, detail="dark not found")

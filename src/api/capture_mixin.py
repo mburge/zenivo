@@ -142,13 +142,17 @@ class CaptureMixin:
                     frame, meta = self.camera.capture_frame()
 
             bayer10 = meta.pop("bayer10", None)
+            mono16 = meta.pop("mono16", None)
 
             # Automatically apply closest Master Dark from library on long exposures (>= 0.4s)
             if not is_pytest and self.calibration_status.get("state") != "running":
                 cur_exp = float(meta.get("actual_exposure_s", getattr(self.camera, "current_exposure_s", 0.2)))
                 cur_gain = float(meta.get("gain_db", getattr(self.camera, "current_gain_db", 12.0)))
                 if cur_exp >= 0.4:
-                    frame, matched_dark = self._apply_closest_master_dark(frame, cur_exp, cur_gain, bayer10=bayer10)
+                    frame, matched_dark = self._apply_closest_master_dark(
+                        frame, cur_exp, cur_gain,
+                        bayer10=bayer10, mono16=mono16,
+                    )
                     if matched_dark:
                         meta["applied_master_dark"] = matched_dark
                     if not self.focus.active:
@@ -156,7 +160,7 @@ class CaptureMixin:
 
             # Mirror / flip / rotate after dark subtraction (darks stay in native sensor orientation)
             isp_frame = self._is_isp_frame(bayer10)
-            meta["capture_path"] = "isp" if isp_frame else "raw10" if bayer10 is not None else "native"
+            meta["capture_path"] = "mono16" if mono16 is not None else "isp" if isp_frame else "raw10" if bayer10 is not None else "native"
             frame = self._apply_image_transform(frame, isp_frame)
             if not self.focus.active:
                 frame = self._apply_output_resolution(frame)

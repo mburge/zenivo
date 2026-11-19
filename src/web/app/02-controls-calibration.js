@@ -359,7 +359,7 @@ async function runAutoDarkLibrary(onlyMissing = false) {
     }
     showAlert(
         darkAlert,
-        "⏳ Capturing and median-stacking 10-bit RAW Master Dark Profiles (0.5s–15.0s / 12–48 dB)...",
+        "⏳ Capturing and median-stacking sensor-native Master Dark Profiles (0.5s–15.0s, within camera gain limits)...",
         "info",
         true
     );
@@ -414,7 +414,7 @@ async function runAutoDarkLibrary(onlyMissing = false) {
         clearInterval(calPollTimer);
         if (btnTriggerDark) {
             btnTriggerDark.disabled = false;
-            btnTriggerDark.textContent = "Capture & Build All Master Dark Profiles (6 Profiles)";
+            btnTriggerDark.textContent = "Capture & Build All Master Dark Profiles (7 Profiles)";
         }
     }
 }

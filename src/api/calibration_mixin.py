@@ -11,8 +11,25 @@ from datetime import datetime
 import numpy as np
 import cv2
 from src.hardware.v4l2_mmap import demosaic_raw10_bayer
+from src.hardware.rawconv import calibrate_mono16, raw16_to_bgr8
 
 class CalibrationMixin:
+    def _native_dark_format(self) -> str:
+        """Native linear calibration plane supplied by the active camera backend."""
+        return "mono16" if getattr(self.camera, "backend", "") == "indi" else "raw10"
+
+    def _native_dark_label(self) -> str:
+        return "16-bit mono RAW" if self._native_dark_format() == "mono16" else "10-bit Bayer RAW"
+
+    def _profile_gain(self, requested_gain_db: float) -> float:
+        """Use the real camera limit so filenames describe the gain that was captured."""
+        maximum = float(getattr(self.camera, "max_gain_db", requested_gain_db))
+        return min(float(requested_gain_db), maximum)
+
+    @staticmethod
+    def _native_dark_filename(fmt: str, exposure_s: float, gain_db: float) -> str:
+        return f"master_dark_{fmt}_exp{exposure_s:.1f}s_gain{gain_db:.0f}dB.npy"
+
     @contextlib.contextmanager
     def _lens_covered(self):
         """A simulated camera sees no sky while the dark frames are taken (a real one has its lens capped)."""
@@ -44,27 +61,32 @@ class CalibrationMixin:
             pass
 
     def get_profiles_matrix(self) -> List[Dict[str, Any]]:
-        """Return status of all 6 standard 10-bit Bayer RAW Master Dark profiles (ready vs missing)."""
+        """Return status of the standard native-RAW Master Dark profiles."""
         self._cleanup_legacy_dark_images()
         existing = {item["filename"]: item for item in self._list_calibration_files()}
         matrix: List[Dict[str, Any]] = []
+        native_format = self._native_dark_format()
         for prof in self.STANDARD_DARK_PROFILES:
-            fname_raw10 = f"master_dark_raw10_exp{prof['exposure_s']:.1f}s_gain{prof['gain_db']:.0f}dB.npy"
-            fname_webp = f"master_dark_exp{prof['exposure_s']:.1f}s_gain{prof['gain_db']:.0f}dB.webp"
-            fname_png = f"master_dark_exp{prof['exposure_s']:.1f}s_gain{prof['gain_db']:.0f}dB.png"
-            info = existing.get(fname_raw10) or existing.get(fname_webp) or existing.get(fname_png)
-            fname = info["filename"] if info else fname_raw10
-            raw10_exists = fname_raw10 in existing
+            gain_db = self._profile_gain(prof["gain_db"])
+            fname_native = self._native_dark_filename(native_format, prof["exposure_s"], gain_db)
+            fname_webp = f"master_dark_exp{prof['exposure_s']:.1f}s_gain{gain_db:.0f}dB.webp"
+            fname_png = f"master_dark_exp{prof['exposure_s']:.1f}s_gain{gain_db:.0f}dB.png"
+            info = existing.get(fname_native) or existing.get(fname_webp) or existing.get(fname_png)
+            fname = info["filename"] if info else fname_native
+            native_exists = fname_native in existing
             matrix.append({
                 "id": prof["id"],
                 "label": prof["label"],
                 "exposure_s": prof["exposure_s"],
-                "gain_db": prof["gain_db"],
+                "gain_db": gain_db,
                 "num_frames": prof["num_frames"],
+                "format": native_format,
                 "filename": fname,
-                "raw_filename": fname_raw10 if raw10_exists else None,
+                "raw_filename": fname_native if native_exists else None,
                 "ready": info is not None,
-                "raw10_ready": raw10_exists,
+                "native_ready": native_exists,
+                "raw10_ready": native_exists and native_format == "raw10",
+                "mono16_ready": native_exists and native_format == "mono16",
                 "size_kb": info["size_kb"] if info else 0.0,
                 "modified_at": info["modified_at"] if info else None,
             })
@@ -91,21 +113,24 @@ class CalibrationMixin:
                     self.calibration_status["state"] = "completed"
                     self.calibration_status["progress_pct"] = 100.0
                     self.calibration_status["message"] = (
-                        f"All {total_count}/{total_count} Standard 10-bit RAW Master Dark Profiles Ready (.npy) — RAW-to-RAW subtraction active."
+                        f"All {total_count}/{total_count} Standard {self._native_dark_label()} Master Dark Profiles Ready — native subtraction active."
                     )
                 else:
                     self.calibration_status["message"] = (
-                        f"{ready_count}/{total_count} Standard 10-bit RAW Master Dark Profiles Ready (Latest: {latest['filename']})"
+                        f"{ready_count}/{total_count} Standard {self._native_dark_label()} Master Dark Profiles Ready (Latest: {latest['filename']})"
                     )
         except Exception:
             pass
 
     def get_dark_preview(self, filename: str):
-        """Return (png_bytes, stats) for a saved RAW10 master dark; None if missing/invalid name."""
+        """Return (png_bytes, stats) for a saved native RAW master dark."""
         import cv2
         name = os.path.basename(filename or "")
-        if name != filename or not (name.startswith("master_dark_raw10_") and name.endswith(".npy")):
+        valid_prefix = name.startswith("master_dark_raw10_") or name.startswith("master_dark_mono16_")
+        if name != filename or not (valid_prefix and name.endswith(".npy")):
             return None
+        mono16 = name.startswith("master_dark_mono16_")
+        saturated_dn = 65535 if mono16 else 1023
         path = os.path.join(self.calibration_dir, name)
         if not os.path.isfile(path):
             return None
@@ -129,37 +154,40 @@ class CalibrationMixin:
         ok, buf = cv2.imencode(".png", img)
         n = a.size
         warnings = []
-        if med > 150:
-            warnings.append("median > 150 DN: dark too bright (light leak / not dark), will be rejected")
+        if med > (16384 if mono16 else 150):
+            warnings.append("dark median is too bright (light leak / not dark), and will be rejected")
         gm = re.search(r"gain(\d+)dB", name)
         gain = float(gm.group(1)) if gm else 0.0
         info = []
-        if med < 20:
+        if not mono16 and med < 20:
             if gain >= 21:
                 info.append("High gain: the sensor black pedestal (36 DN @12 dB, 13 @18 dB) falls to 0 from ~21 dB and clips, so this dark holds only hot pixels. Expected.")
             else:
                 warnings.append("median < 20 DN at low gain: black level should still be ~13-36 DN, dark is suspect")
-        if float((a >= 1023).sum()) / n > 0.001:
-            warnings.append("more than 0.1% saturated pixels (1023)")
+        if float((a >= saturated_dn).sum()) / n > 0.001:
+            warnings.append(f"more than 0.1% saturated pixels ({saturated_dn})")
         stats = {
             "filename": name, "shape": [int(h), int(w)], "dtype": str(arr.dtype),
             "min": float(a.min()), "max": float(a.max()), "mean": round(float(a.mean()), 2),
             "median": round(med, 2), "std": round(float(a.std()), 2),
             "zero_pct": round(float((a == 0).sum()) / n * 100, 2),
-            "saturated_pct": round(float((a >= 1023).sum()) / n * 100, 3),
+            "saturated_pct": round(float((a >= saturated_dn).sum()) / n * 100, 3),
             "stretch": [round(lo, 1), round(hi, 1)], "warnings": warnings, "info": info,
         }
         return (buf.tobytes() if ok else b""), stats
 
     def _list_calibration_files(self) -> List[Dict[str, Any]]:
-        """List saved 10-bit Bayer RAW master dark files (master_dark_raw10_*.npy) in data/calibration/darks/ sorted newest first."""
+        """List saved native RAW master dark files sorted newest first."""
         files_info: List[Dict[str, Any]] = []
         is_pytest = bool(os.environ.get("PYTEST_CURRENT_TEST"))
         try:
             if not os.path.isdir(self.calibration_dir):
                 return files_info
             for fname in os.listdir(self.calibration_dir):
-                if fname.startswith("master_dark_raw10_") and fname.endswith(".npy"):
+                if (
+                    fname.startswith(("master_dark_raw10_", "master_dark_mono16_"))
+                    and fname.endswith(".npy")
+                ):
                     pass
                 elif is_pytest and fname.startswith("master_dark_") and fname.endswith((".webp", ".png")):
                     pass
@@ -185,6 +213,8 @@ class CalibrationMixin:
     def get_calibration_status(self) -> Dict[str, Any]:
         """Return live calibration progress, preset matrix, latest result, and saved calibration library (lock-free)."""
         status_copy = dict(self.calibration_status)
+        status_copy["native_format"] = self._native_dark_format()
+        status_copy["native_format_label"] = self._native_dark_label()
         status_copy["library"] = self._list_calibration_files()
         status_copy["profiles"] = self.get_profiles_matrix()
         status_copy["ready_profiles_count"] = sum(1 for p in status_copy["profiles"] if p["ready"])
@@ -192,7 +222,8 @@ class CalibrationMixin:
         return status_copy
 
     def _apply_closest_master_dark(
-        self, frame: np.ndarray, exp_s: float, gain_db: float, bayer10: Optional[np.ndarray] = None
+        self, frame: np.ndarray, exp_s: float, gain_db: float,
+        bayer10: Optional[np.ndarray] = None, mono16: Optional[np.ndarray] = None,
     ) -> Tuple[np.ndarray, Optional[str]]:
         """
         Find and subtract the closest matching Master Dark from data/calibration/darks/,
@@ -201,7 +232,7 @@ class CalibrationMixin:
         (Light_RAW10 - Dark_RAW10) and Bayer sub-plane hot-pixel repair BEFORE demosaicing.
         """
         try:
-            ready_profiles = [p for p in self.get_profiles_matrix() if p["ready"] or p.get("raw10_ready")]
+            ready_profiles = [p for p in self.get_profiles_matrix() if p["ready"]]
             if not ready_profiles:
                 return frame, None
             best = min(
@@ -217,7 +248,24 @@ class CalibrationMixin:
                     hot_mask = np.load(hot_path)
                     self._dark_cache[hot_key] = hot_mask
 
-            # 1. True 10-bit Bayer RAW-to-RAW dark subtraction BEFORE demosaicing
+            # 1. Native 16-bit mono subtraction and repair before display conversion
+            if mono16 is not None:
+                mono_fname = self._native_dark_filename(
+                    "mono16", best["exposure_s"], best["gain_db"]
+                )
+                master_mono16 = self._dark_cache.get(mono_fname)
+                if master_mono16 is None:
+                    mono_path = os.path.join(self.calibration_dir, mono_fname)
+                    if os.path.isfile(mono_path):
+                        master_mono16 = np.load(mono_path)
+                        self._dark_cache[mono_fname] = master_mono16
+                if master_mono16 is not None and master_mono16.shape == mono16.shape:
+                    # A covered full-scale mono sensor should stay well below 25% of range.
+                    if float(np.median(master_mono16[::16, ::16])) <= 16384.0:
+                        calibrated_mono16 = calibrate_mono16(mono16, master_mono16, hot_mask)
+                        return raw16_to_bgr8(calibrated_mono16), mono_fname
+
+            # 2. True 10-bit Bayer RAW-to-RAW dark subtraction BEFORE demosaicing
             if bayer10 is not None:
                 raw_fname = f"master_dark_raw10_exp{best['exposure_s']:.1f}s_gain{best['gain_db']:.0f}dB.npy"
                 master_raw10 = self._dark_cache.get(raw_fname)
@@ -236,7 +284,7 @@ class CalibrationMixin:
                     )
                     return calibrated_bgr8, (raw_fname if valid_dark is not None else None)
 
-            # 2. Fallback image-space subtraction (used in simulator/unit tests)
+            # 3. Fallback image-space subtraction (used in simulator/unit tests)
             fname = best["filename"]
             master = self._dark_cache.get(fname)
             if master is None:
@@ -261,9 +309,10 @@ class CalibrationMixin:
 
     def trigger_master_dark(self, num_frames: int, exposure_s: float, gain_db: float) -> Dict[str, Any]:
         """
-        Capture N dark frames at specified exposure & gain, generate 10-bit Bayer RAW master dark,
-        detect hot pixels directly in RAW10 space, and save both .npy RAW10 and .webp preview.
+        Capture N dark frames at specified exposure & gain, generate a native RAW master dark,
+        detect hot pixels in the native plane, and save the lossless master as .npy.
         """
+        native_label = self._native_dark_label()
         prev_exp = getattr(self.camera, "current_exposure_s", 0.2)
         prev_gain = getattr(self.camera, "current_gain_db", 12.0)
 
@@ -282,13 +331,19 @@ class CalibrationMixin:
         try:
             with self.lock, self._lens_covered():
                 self.camera.set_hardware_exposure(exposure_s, gain_db)
+                gain_db = float(getattr(self.camera, "current_gain_db", gain_db))
+                self.calibration_status["gain_db"] = gain_db
                 dark_frames: List[np.ndarray] = []
                 raw_bayers: List[np.ndarray] = []
+                mono16_frames: List[np.ndarray] = []
 
                 def _on_frame_progress(idx: int, total: int, frame_bgr: np.ndarray, meta: Dict[str, Any]):
                     b10 = meta.pop("bayer10", None)
                     if b10 is not None:
                         raw_bayers.append(b10)
+                    m16 = meta.pop("mono16", None)
+                    if m16 is not None:
+                        mono16_frames.append(m16)
                     self.last_frame = frame_bgr
                     self.last_metadata = meta
                     self.last_capture_time = time.time()
@@ -298,7 +353,7 @@ class CalibrationMixin:
                         "current_frame": idx,
                         "total_frames": total,
                         "progress_pct": pct,
-                        "message": f"Capturing RAW10 dark frame {idx} / {total} ({exposure_s:.2f}s @ {gain_db:.0f} dB)...",
+                        "message": f"Capturing {native_label} dark frame {idx} / {total} ({exposure_s:.2f}s @ {gain_db:.1f} dB)...",
                         "updated_at": datetime.now().astimezone().isoformat(),
                     })
 
@@ -321,13 +376,25 @@ class CalibrationMixin:
                     "current_frame": num_frames,
                     "total_frames": num_frames,
                     "progress_pct": 90.0,
-                    "message": f"Median stacking {num_frames} 10-bit Bayer RAW frames & extracting hot pixel map...",
+                    "message": f"Median stacking {num_frames} {native_label} frames & extracting hot pixel map...",
                     "updated_at": datetime.now().astimezone().isoformat(),
                 })
 
                 raw_filename = f"master_dark_raw10_exp{exposure_s:.1f}s_gain{gain_db:.0f}dB.npy"
                 raw_path = os.path.join(self.calibration_dir, raw_filename)
-                if raw_bayers:
+                if mono16_frames:
+                    master_mono16 = np.round(np.median(np.stack(mono16_frames, axis=0), axis=0)).astype(np.uint16)
+                    filename = self._native_dark_filename("mono16", exposure_s, gain_db)
+                    file_path = os.path.join(self.calibration_dir, filename)
+                    np.save(file_path, master_mono16)
+                    self._dark_cache[filename] = master_mono16
+                    pedestal = float(np.median(master_mono16[::16, ::16]))
+                    hot_mask = (master_mono16.astype(np.float32) - pedestal) >= 4096.0
+                    mean_dn = round(float(np.mean(master_mono16)), 2)
+                    std_dn = round(float(np.std(master_mono16)), 2)
+                    max_dn = int(np.max(master_mono16))
+                    raw_filename = filename
+                elif raw_bayers:
                     master_raw10 = np.round(np.median(np.stack(raw_bayers, axis=0), axis=0)).astype(np.uint16)
                     np.save(raw_path, master_raw10)
                     self._dark_cache[raw_filename] = master_raw10
@@ -347,7 +414,8 @@ class CalibrationMixin:
                     max_dn = int(np.max(master_dark))
                     filename = f"master_dark_exp{exposure_s:.1f}s_gain{gain_db:.0f}dB.webp"
                     file_path = os.path.join(self.calibration_dir, filename)
-                    cv2.imwrite(file_path, master_dark, [cv2.IMWRITE_WEBP_QUALITY, 95])
+                    if not cv2.imwrite(file_path, master_dark, [cv2.IMWRITE_WEBP_QUALITY, 95]):
+                        raise RuntimeError(f"OpenCV could not write {file_path}")
                     self._dark_cache[filename] = master_dark
 
                 hot_pixels = int(np.sum(hot_mask))
@@ -370,7 +438,7 @@ class CalibrationMixin:
                 result = {
                     "success": True,
                     "filename": filename,
-                    "raw_filename": raw_filename if raw_bayers else None,
+                    "raw_filename": raw_filename if (raw_bayers or mono16_frames) else None,
                     "file_path": file_path,
                     "hot_map_filename": hot_map_filename,
                     "frames_stacked": num_frames,
@@ -389,7 +457,7 @@ class CalibrationMixin:
                     "total_frames": num_frames,
                     "progress_pct": 100.0,
                     "message": (
-                        f"Completed: {filename} ({num_frames} RAW10 frames stacked, "
+                        f"Completed: {filename} ({num_frames} {native_label} frames stacked, "
                         f"{hot_pixels} hot pixels detected, mean DN {mean_dn})"
                     ),
                     "last_result": result,
@@ -414,11 +482,11 @@ class CalibrationMixin:
     def trigger_auto_dark_library(self, only_missing: bool = False) -> Dict[str, Any]:
         """
         Automatically capture & stack all standard Master Dark profiles (or only missing ones)
-        in 10-bit Bayer RAW (.npy). If some profiles are already present on disk, only captures
+        in the active camera's native RAW format (.npy). If some profiles are already present on disk, only captures
         the missing profiles unless all are already present.
         """
         matrix = self.get_profiles_matrix()
-        missing = [p for p in matrix if not p.get("raw10_ready")]
+        missing = [p for p in matrix if not p.get("native_ready")]
         if only_missing:
             targets = missing
         elif 0 < len(missing) < len(matrix):
@@ -431,7 +499,7 @@ class CalibrationMixin:
             self.calibration_status.update({
                 "state": "completed",
                 "progress_pct": 100.0,
-                "message": f"All {total}/{total} Standard 10-bit RAW Master Dark Profiles are already built and ready!",
+                "message": f"All {total}/{total} Standard {self._native_dark_label()} Master Dark Profiles are already built and ready!",
                 "updated_at": datetime.now().astimezone().isoformat(),
             })
             return {
@@ -439,13 +507,14 @@ class CalibrationMixin:
                 "profiles_built": 0,
                 "total_profiles": total,
                 "results": [],
-                "message": f"All {total}/{total} Standard 10-bit RAW Master Dark Profiles Ready.",
+                "message": f"All {total}/{total} Standard {self._native_dark_label()} Master Dark Profiles Ready.",
             }
 
         prev_exp = getattr(self.camera, "current_exposure_s", 0.2)
         prev_gain = getattr(self.camera, "current_gain_db", 12.0)
         results: List[Dict[str, Any]] = []
         total_targets = len(targets)
+        native_label = self._native_dark_label()
 
         try:
             for p_idx, prof in enumerate(targets, start=1):
@@ -466,19 +535,25 @@ class CalibrationMixin:
                     "exposure_s": exp_s,
                     "gain_db": gain_db,
                     "progress_pct": round(base_pct + 2.0, 1),
-                    "message": f"[Profile {p_idx}/{total_targets}: {label} — {exp_s:.1f}s @ {gain_db:.0f}dB] Configuring RAW10 sensor...",
+                    "message": f"[Profile {p_idx}/{total_targets}: {label} — {exp_s:.1f}s @ {gain_db:.1f}dB] Configuring {native_label} sensor...",
                     "updated_at": datetime.now().astimezone().isoformat(),
                 })
 
                 with self.lock, self._lens_covered():
                     self.camera.set_hardware_exposure(exp_s, gain_db)
+                    gain_db = float(getattr(self.camera, "current_gain_db", gain_db))
+                    self.calibration_status["gain_db"] = gain_db
                     dark_frames: List[np.ndarray] = []
                     raw_bayers: List[np.ndarray] = []
+                    mono16_frames: List[np.ndarray] = []
 
                     def _on_prof_frame(idx: int, total: int, frame_bgr: np.ndarray, meta: Dict[str, Any]):
                         b10 = meta.pop("bayer10", None)
                         if b10 is not None:
                             raw_bayers.append(b10)
+                        m16 = meta.pop("mono16", None)
+                        if m16 is not None:
+                            mono16_frames.append(m16)
                         self.last_frame = frame_bgr
                         self.last_metadata = meta
                         self.last_capture_time = time.time()
@@ -492,7 +567,7 @@ class CalibrationMixin:
                             "progress_pct": pct,
                             "message": (
                                 f"[Profile {p_idx}/{total_targets}: {label} — {exp_s:.1f}s @ {gain_db:.0f}dB] "
-                                f"Capturing RAW10 frame {idx}/{total}..."
+                                f"Capturing {native_label} frame {idx}/{total}..."
                             ),
                             "updated_at": datetime.now().astimezone().isoformat(),
                         })
@@ -513,7 +588,17 @@ class CalibrationMixin:
 
                     raw_filename = f"master_dark_raw10_exp{exp_s:.1f}s_gain{gain_db:.0f}dB.npy"
                     raw_path = os.path.join(self.calibration_dir, raw_filename)
-                    if raw_bayers:
+                    if mono16_frames:
+                        master_mono16 = np.round(np.median(np.stack(mono16_frames, axis=0), axis=0)).astype(np.uint16)
+                        filename = self._native_dark_filename("mono16", exp_s, gain_db)
+                        file_path = os.path.join(self.calibration_dir, filename)
+                        np.save(file_path, master_mono16)
+                        self._dark_cache[filename] = master_mono16
+                        pedestal = float(np.median(master_mono16[::16, ::16]))
+                        hot_mask = (master_mono16.astype(np.float32) - pedestal) >= 4096.0
+                        mean_dn = round(float(np.mean(master_mono16)), 2)
+                        raw_filename = filename
+                    elif raw_bayers:
                         master_raw10 = np.round(np.median(np.stack(raw_bayers, axis=0), axis=0)).astype(np.uint16)
                         np.save(raw_path, master_raw10)
                         self._dark_cache[raw_filename] = master_raw10
@@ -529,7 +614,8 @@ class CalibrationMixin:
                         mean_dn = round(float(np.mean(master_dark)), 2)
                         filename = f"master_dark_exp{exp_s:.1f}s_gain{gain_db:.0f}dB.webp"
                         file_path = os.path.join(self.calibration_dir, filename)
-                        cv2.imwrite(file_path, master_dark, [cv2.IMWRITE_WEBP_QUALITY, 95])
+                        if not cv2.imwrite(file_path, master_dark, [cv2.IMWRITE_WEBP_QUALITY, 95]):
+                            raise RuntimeError(f"OpenCV could not write {file_path}")
                         self._dark_cache[filename] = master_dark
 
                     hot_pixels = int(np.sum(hot_mask))
@@ -542,7 +628,7 @@ class CalibrationMixin:
                         "profile_id": prof["id"],
                         "label": label,
                         "filename": filename,
-                        "raw_filename": raw_filename if raw_bayers else None,
+                        "raw_filename": raw_filename if (raw_bayers or mono16_frames) else None,
                         "frames_stacked": n_frames,
                         "exposure_s": exp_s,
                         "gain_db": gain_db,
@@ -567,7 +653,7 @@ class CalibrationMixin:
             total_all = len(self.STANDARD_DARK_PROFILES)
             done_msg = (
                 f"Auto-Calibration Complete: {len(results)} profile(s) built — "
-                f"All {total_all}/{total_all} 10-bit RAW Master Dark Profiles Ready for automatic RAW subtraction!"
+                f"All {total_all}/{total_all} {native_label} Master Dark Profiles Ready for automatic native subtraction!"
             )
             self.calibration_status.update({
                 "state": "completed",
