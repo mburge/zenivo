@@ -111,11 +111,13 @@ function drawReticle() {
     ctx.rect(offsetX, offsetY, renderW, renderH);
     ctx.clip();
 
-    // Displayed image is mirrored/flipped server-side; map native sensor coords the same way
+    // Native solver coordinates follow the configured image transform.  Imported solutions may
+    // already be registered to displayed pixels; in that case applying it again mirrors the overlay.
     const tf = st.image_transform || {};
     const rot180 = Number(tf.rotate_deg || 0) % 360 === 180;
-    const mirrorX = !!tf.flip_horizontal !== rot180;
-    const mirrorY = !!tf.flip_vertical !== rot180;
+    const solutionIsDisplay = ori.coordinate_space === "display";
+    const mirrorX = !solutionIsDisplay && (!!tf.flip_horizontal !== rot180);
+    const mirrorY = !solutionIsDisplay && (!!tf.flip_vertical !== rot180);
     // Solver/optics coordinates are pixel indices (centre of pixel i at i); the canvas draws the picture with
     // pixel i covering [i, i+1), so add half a pixel, and mirror around the frame edge (index i -> W-1-i)
     const toImgX = (sx) => (mirrorX ? sensorW - sx - 0.5 : sx + 0.5);

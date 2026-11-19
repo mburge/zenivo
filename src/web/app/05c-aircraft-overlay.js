@@ -176,8 +176,9 @@ function drawAircraft() {
     }
     const tf = st.image_transform || {};
     const rot180 = Number(tf.rotate_deg || 0) % 360 === 180;
-    const mirrorX = !!tf.flip_horizontal !== rot180;
-    const mirrorY = !!tf.flip_vertical !== rot180;
+    const solutionIsDisplay = (st.orientation || {}).coordinate_space === "display";
+    const mirrorX = !solutionIsDisplay && (!!tf.flip_horizontal !== rot180);
+    const mirrorY = !solutionIsDisplay && (!!tf.flip_vertical !== rot180);
 
     ctx.save();
     ctx.beginPath();

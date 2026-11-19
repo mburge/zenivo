@@ -238,8 +238,9 @@ class TrafficMixin:
             # the displayed frame, and convert the roll to the skyview convention (opposite sign to the solver's).
             tf = self.station_config.get("image_transform") or {}
             rot180 = int(tf.get("rotate_deg", 0)) % 360 == 180
-            fh = bool(tf.get("flip_horizontal")) != rot180
-            fv = bool(tf.get("flip_vertical")) != rot180
+            solution_is_display = sol.get("coordinate_space") == "display"
+            fh = not solution_is_display and (bool(tf.get("flip_horizontal")) != rot180)
+            fv = not solution_is_display and (bool(tf.get("flip_vertical")) != rot180)
             roll = -float(sol.get("roll_deg") or 0.0)
             try:
                 # Lens in sensor pixels (station optics), whatever size the star solve ran at; the page maps the picture by proportion
